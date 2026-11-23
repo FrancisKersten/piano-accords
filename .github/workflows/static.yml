@@ -31,17 +31,19 @@ jobs:
           python3 - <<'PY'
           import re
           import shutil
+          import stat
           import zipfile
-          from pathlib import Path
+          from pathlib import Path, PurePosixPath
 
-          prefix = 'MUS-001'
-          pattern = re.compile(r'^MUS-001_v([0-9]{3})(?:_[A-Za-z0-9][A-Za-z0-9._-]*)?\.zip$', re.IGNORECASE)
+          # MUS-001_v017.zip ou MUS-001_v017 Description libre.zip
+          pattern = re.compile(r'^MUS-001_v([0-9]{3})(?:[ _-].*)?\.zip$', re.IGNORECASE)
           candidates = []
           for path in Path('.').iterdir():
               if path.is_file():
                   match = pattern.fullmatch(path.name)
                   if match:
                       candidates.append((int(match.group(1)), path))
+
           if not candidates:
               raise SystemExit('ERREUR : aucun ZIP MUS-001_vNNN.zip trouve a la racine du depot.')
           latest = max(number for number, _ in candidates)
@@ -49,46 +51,57 @@ jobs:
           if len(matches) != 1:
               raise SystemExit(f'ERREUR : plusieurs ZIP pour la version v{latest:03d}: {matches}')
           archive = matches[0]
-          print(f'Publication : {archive.name}')
+          print(f'Publication : {archive.name}', flush=True)
 
           output = Path('_site')
-          output.mkdir(exist_ok=True)
-          with zipfile.ZipFile(archive) as z:
-              entries = [i for i in z.infolist() if not i.is_dir() and not i.filename.startswith('__MACOSX/') and Path(i.filename).name != '.DS_Store']
-              if not entries:
-                  raise SystemExit('ERREUR : archive vide.')
-              # Reject absolute paths, parent traversal, symlinks and duplicate output paths.
-              paths = []
-              for i in entries:
-                  p = Path(i.filename)
-                  if p.is_absolute() or '..' in p.parts or '\\' in i.filename or ':' in i.filename:
-                      raise SystemExit(f'ERREUR : chemin non autorise : {i.filename}')
-                  if (i.external_attr >> 16) & 0o170000 == 0o120000:
-                      raise SystemExit(f'ERREUR : lien symbolique interdit : {i.filename}')
-                  paths.append(p)
-              if not any(p.name == 'index.html' for p in paths):
-                  raise SystemExit('ERREUR : index.html absent du ZIP.')
-              # Accept index.html at root or within one single top-level directory.
-              if Path('index.html') in paths:
-                  strip = None
-              else:
-                  roots = {p.parts[0] for p in paths}
-                  if len(roots) != 1 or len(next(iter(roots))) == 0:
-                      raise SystemExit('ERREUR : placer index.html a la racine ou dans un dossier unique.')
-                  strip = next(iter(roots))
-                  if Path(strip, 'index.html') not in paths:
-                      raise SystemExit('ERREUR : index.html doit etre a la racine du dossier unique.')
-              seen = set()
-              for info, path in zip(entries, paths):
-                  relative = Path(*path.parts[1:]) if strip else path
-                  if not relative.parts or relative in seen:
-                      raise SystemExit(f'ERREUR : fichier duplique ou invalide : {path}')
-                  seen.add(relative)
-                  destination = output / relative
-                  destination.parent.mkdir(parents=True, exist_ok=True)
-                  with z.open(info) as source, destination.open('wb') as target:
-                      shutil.copyfileobj(source, target)
-          print(f'Site pret : {len(seen)} fichiers, version v{latest:03d}')
+          if output.exists():
+              shutil.rmtree(output)
+          output.mkdir()
+          try:
+              with zipfile.ZipFile(archive) as z:
+                  entries = []
+                  for info in z.infolist():
+                      if info.is_dir():
+                          continue
+                      name = info.filename
+                      path = PurePosixPath(name)
+                      if name.startswith('__MACOSX/') or path.name == '.DS_Store':
+                          continue
+                      if (name.startswith('/') or '\\' in name or ':' in name
+                              or '..' in path.parts or not path.parts):
+                          raise SystemExit(f'ERREUR : chemin non autorise : {name}')
+                      mode = (info.external_attr >> 16)
+                      if stat.S_IFMT(mode) == stat.S_IFLNK:
+                          raise SystemExit(f'ERREUR : lien symbolique interdit : {name}')
+                      entries.append((info, path))
+                  if not entries:
+                      raise SystemExit('ERREUR : archive vide.')
+
+                  paths = [p for _, p in entries]
+                  if PurePosixPath('index.html') in paths:
+                      strip = False
+                  else:
+                      roots = {p.parts[0] for p in paths}
+                      if len(roots) != 1:
+                          raise SystemExit('ERREUR : index.html absent de la racine ou du dossier unique.')
+                      root = next(iter(roots))
+                      if PurePosixPath(root, 'index.html') not in paths:
+                          raise SystemExit('ERREUR : index.html absent du dossier principal.')
+                      strip = True
+
+                  seen = set()
+                  for info, path in entries:
+                      relative = PurePosixPath(*path.parts[1:]) if strip else path
+                      if not relative.parts or relative in seen:
+                          raise SystemExit(f'ERREUR : fichier duplique ou invalide : {path}')
+                      seen.add(relative)
+                      destination = output.joinpath(*relative.parts)
+                      destination.parent.mkdir(parents=True, exist_ok=True)
+                      with z.open(info) as source, destination.open('wb') as target:
+                          shutil.copyfileobj(source, target)
+          except zipfile.BadZipFile as exc:
+              raise SystemExit(f'ERREUR : ZIP invalide : {exc}')
+          print(f'Site pret : {len(seen)} fichiers, version v{latest:03d}', flush=True)
           PY
 
       - name: Configurer GitHub Pages
@@ -102,3 +115,4 @@ jobs:
       - name: Publier sur GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+  
