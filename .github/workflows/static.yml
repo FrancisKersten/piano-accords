@@ -1,0 +1,68 @@
+
+name: Publier le ZIP sur GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Recuperer le depot
+        uses: actions/checkout@v4
+
+      - name: Extraire le ZIP
+        run: |
+          mkdir -p _site
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          archive = Path("site.zip")
+          if not archive.is_file():
+              raise SystemExit("Fichier site.zip introuvable")
+
+          with ZipFile(archive) as z:
+              z.extractall("_site")
+
+          root = Path("_site")
+          if not (root / "index.html").is_file():
+              dirs = [p for p in root.iterdir() if p.is_dir()]
+              files = [p for p in root.iterdir() if p.is_file()]
+              if len(dirs) == 1 and not files:
+                  import shutil
+                  folder = dirs[0]
+                  for item in folder.iterdir():
+                      shutil.move(str(item), str(root / item.name))
+                  folder.rmdir()
+
+          if not (root / "index.html").is_file():
+              raise SystemExit("index.html introuvable dans le ZIP")
+          PY
+
+      - name: Preparer GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Envoyer le site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Publier le site
+        id: deployment
+        uses: actions/deploy-pages@v4
